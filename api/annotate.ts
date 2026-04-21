@@ -9,8 +9,9 @@ import {
 import { iterateSources } from "./lib/videoSource.js";
 
 export const config = {
-  // Long-running stream; requires Vercel Pro for the full 300s.
-  maxDuration: 300,
+  // cap duration to 60s for now (vercel hobby plan)
+  // will increase this in the future for scalability
+  maxDuration: 60,
 };
 
 type Body = { fileName?: unknown; hints?: unknown };
@@ -55,8 +56,8 @@ export default async function handler(
   });
 
   try {
-    send("status", { phase: "waiting-for-active" });
-    const file = await waitUntilActive(fileName);
+    // File is already ACTIVE from /api/blob-to-gemini; this is a cheap metadata fetch.
+    const file = await waitUntilActive(fileName, { timeoutMs: 10_000 });
     if (!file.uri) throw new Error("File has no URI after becoming ACTIVE");
 
     send("status", { phase: "streaming" });

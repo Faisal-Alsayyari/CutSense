@@ -4,17 +4,18 @@ import { ProgressBar } from "./components/ProgressBar";
 import { Transcript } from "./components/Transcript";
 import { CopyButton } from "./components/CopyButton";
 import {
-  requestUploadUrl,
+  uploadToBlob,
+  blobToGemini,
   streamAnnotations,
-  uploadToGemini,
+  deleteBlob,
   type Annotation,
 } from "./lib/api";
 import "./App.css";
 
 type Phase =
   | "idle"
-  | "uploading"
-  | "waiting-for-active"
+  | "uploading-to-blob"
+  | "processing"
   | "streaming"
   | "done"
   | "error";
@@ -46,35 +47,42 @@ function App() {
     const ctrl = new AbortController();
     abortRef.current = ctrl;
 
+    let blobUrl: string | null = null;
     try {
-      setPhase("uploading");
-      const { uploadUrl } = await requestUploadUrl(file);
-      const fileName = await uploadToGemini(
-        uploadUrl,
-        file,
-        setUploadFraction,
+      setPhase("uploading-to-blob");
+      const uploaded = await uploadToBlob(file, setUploadFraction, ctrl.signal);
+      blobUrl = uploaded.blobUrl;
+
+      setPhase("processing");
+      const { fileName } = await blobToGemini(
+        uploaded.blobUrl,
+        uploaded.mimeType,
+        uploaded.size,
         ctrl.signal
       );
 
-      setPhase("waiting-for-active");
       await streamAnnotations(
         fileName,
         hints || undefined,
         {
           onStatus: (p) => {
             if (p === "streaming") setPhase("streaming");
-            else if (p === "waiting-for-active") setPhase("waiting-for-active");
           },
           onAnnotation: (a) => setRows((prev) => [...prev, a]),
-          onDone: () => setPhase("done"),
+          onDone: () => {
+            setPhase("done");
+            if (blobUrl) void deleteBlob(blobUrl);
+          },
           onError: (msg) => {
             setError(msg);
             setPhase("error");
+            if (blobUrl) void deleteBlob(blobUrl);
           },
         },
         ctrl.signal
       );
     } catch (err) {
+      if (blobUrl) void deleteBlob(blobUrl);
       if ((err as { name?: string }).name === "AbortError") return;
       setError(err instanceof Error ? err.message : String(err));
       setPhase("error");
@@ -82,15 +90,15 @@ function App() {
   }, [file, hints]);
 
   const busy =
-    phase === "uploading" ||
-    phase === "waiting-for-active" ||
+    phase === "uploading-to-blob" ||
+    phase === "processing" ||
     phase === "streaming";
 
   return (
     <div className="app">
       <header className="app-header">
-        <h1>CutSense</h1>
-        <p>Drop raw footage → get a timestamped transcript.</p>
+        <h1>CutSense MVP</h1>
+        <p>Drop raw footage, get a timestamped transcript.</p>
       </header>
 
       <main className="app-main">
@@ -169,10 +177,10 @@ function StatusLine({
   if (phase === "idle") return null;
   if (phase === "error")
     return <div className="status error">Error: {error}</div>;
-  if (phase === "uploading")
+  if (phase === "uploading-to-blob")
     return <ProgressBar fraction={uploadFraction} label="Uploading" />;
-  if (phase === "waiting-for-active")
-    return <div className="status">Gemini is processing the video…</div>;
+  if (phase === "processing")
+    return <div className="status">Sending to Gemini…</div>;
   if (phase === "streaming")
     return <div className="status pulse">Annotating live…</div>;
   if (phase === "done") return <div className="status success">Done.</div>;

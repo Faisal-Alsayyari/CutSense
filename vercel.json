@@ -4,7 +4,10 @@
   "outputDirectory": "dist",
   "functions": {
     "api/annotate.ts": {
-      "maxDuration": 300
+      "maxDuration": 60
+    },
+    "api/blob-to-gemini.ts": {
+      "maxDuration": 60
     }
   }
 }

@@ -1,78 +1,56 @@
+import { upload } from "@vercel/blob/client";
+
 export type Annotation = { t: string; d: string };
 
-/** Dev-only proxy: forward /api/* to `vercel dev` when running `vite` standalone. */
-export const API_BASE = "";
+const API_BASE = "";
 
-export async function requestUploadUrl(file: File): Promise<{ uploadUrl: string }> {
-  const res = await fetch(`${API_BASE}/api/upload-url`, {
+export async function uploadToBlob(
+  file: File,
+  onProgress: (fraction: number) => void,
+  signal?: AbortSignal
+): Promise<{ blobUrl: string; size: number; mimeType: string }> {
+  const result = await upload(file.name, file, {
+    access: "public",
+    handleUploadUrl: `${API_BASE}/api/blob-upload`,
+    contentType: file.type,
+    abortSignal: signal,
+    onUploadProgress: ({ percentage }) => onProgress(percentage / 100),
+  });
+  return { blobUrl: result.url, size: file.size, mimeType: file.type };
+}
+
+export async function blobToGemini(
+  blobUrl: string,
+  mimeType: string,
+  size: number,
+  signal?: AbortSignal
+): Promise<{ fileName: string }> {
+  const res = await fetch(`${API_BASE}/api/blob-to-gemini`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      filename: file.name,
-      mimeType: file.type,
-      sizeBytes: file.size,
-    }),
+    body: JSON.stringify({ blobUrl, mimeType, size }),
+    signal,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error(err.error ?? `upload-url failed (${res.status})`);
+    throw new Error(
+      (err as { error?: string }).error ?? `blob-to-gemini failed (${res.status})`
+    );
   }
   return res.json();
 }
 
-/**
- * PUT the file bytes directly to the Gemini resumable upload URL,
- * with XHR so we can report byte-level progress.
- *
- * Returns the resulting `fileName` (e.g. "files/abc123") from Gemini.
- */
-export function uploadToGemini(
-  uploadUrl: string,
-  file: File,
-  onProgress: (fraction: number) => void,
-  signal?: AbortSignal
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const xhr = new XMLHttpRequest();
-    xhr.open("PUT", uploadUrl, true);
-    xhr.setRequestHeader("Content-Type", file.type);
-    xhr.setRequestHeader("Content-Length", String(file.size));
-    xhr.setRequestHeader("X-Goog-Upload-Offset", "0");
-    xhr.setRequestHeader("X-Goog-Upload-Command", "upload, finalize");
-
-    xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress(e.loaded / e.total);
-    };
-    xhr.onload = () => {
-      if (xhr.status < 200 || xhr.status >= 300) {
-        reject(new Error(`Upload failed (${xhr.status}): ${xhr.responseText}`));
-        return;
-      }
-      try {
-        const body = JSON.parse(xhr.responseText) as {
-          file?: { name?: string };
-        };
-        const name = body.file?.name;
-        if (!name) {
-          reject(new Error("Upload response missing file.name"));
-          return;
-        }
-        resolve(name);
-      } catch (e) {
-        reject(e);
-      }
-    };
-    xhr.onerror = () => reject(new Error("Network error during upload"));
-    xhr.onabort = () => reject(new DOMException("Upload aborted", "AbortError"));
-    if (signal) {
-      if (signal.aborted) {
-        xhr.abort();
-        return;
-      }
-      signal.addEventListener("abort", () => xhr.abort(), { once: true });
-    }
-    xhr.send(file);
-  });
+export async function deleteBlob(blobUrl: string): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/api/delete-blob`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ blobUrl }),
+      keepalive: true,
+    });
+  } catch {
+    // ignore
+  }
 }
 
 export type SSEHandlers = {
@@ -82,10 +60,6 @@ export type SSEHandlers = {
   onError?: (message: string) => void;
 };
 
-/**
- * POST /api/annotate and read the SSE stream via fetch + ReadableStream.
- * (EventSource can't POST, so we parse SSE manually.)
- */
 export async function streamAnnotations(
   fileName: string,
   hints: string | undefined,
@@ -112,7 +86,6 @@ export async function streamAnnotations(
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
 
-    // SSE events are separated by a blank line.
     let sepIdx: number;
     while ((sepIdx = buffer.indexOf("\n\n")) !== -1) {
       const rawEvent = buffer.slice(0, sepIdx);
