@@ -1,22 +1,40 @@
-import { upload } from "@vercel/blob/client";
-
 export type Annotation = { t: string; d: string };
 
 const API_BASE = "";
 
-export async function uploadToBlob(
+export function uploadToBlob(
   file: File,
   onProgress: (fraction: number) => void,
   signal?: AbortSignal
 ): Promise<{ blobUrl: string; size: number; mimeType: string }> {
-  const result = await upload(file.name, file, {
-    access: "public",
-    handleUploadUrl: `${API_BASE}/api/blob-upload`,
-    contentType: file.type,
-    abortSignal: signal,
-    onUploadProgress: ({ percentage }) => onProgress(percentage / 100),
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+
+    xhr.upload.addEventListener("progress", (e) => {
+      if (e.lengthComputable) onProgress(e.loaded / e.total);
+    });
+
+    xhr.addEventListener("load", () => {
+      if (xhr.status === 200) {
+        const data = JSON.parse(xhr.responseText) as {
+          blobUrl: string;
+          size: number;
+        };
+        resolve({ blobUrl: data.blobUrl, size: data.size, mimeType: file.type });
+      } else {
+        const data = JSON.parse(xhr.responseText) as { error?: string };
+        reject(new Error(data.error ?? `Upload failed (${xhr.status})`));
+      }
+    });
+
+    xhr.addEventListener("error", () => reject(new Error("Network error during upload")));
+    xhr.addEventListener("abort", () => reject(Object.assign(new Error("AbortError"), { name: "AbortError" })));
+    signal?.addEventListener("abort", () => xhr.abort());
+
+    xhr.open("POST", `${API_BASE}/api/upload?filename=${encodeURIComponent(file.name)}`);
+    xhr.setRequestHeader("Content-Type", file.type);
+    xhr.send(file);
   });
-  return { blobUrl: result.url, size: file.size, mimeType: file.type };
 }
 
 export async function blobToGemini(
